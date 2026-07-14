@@ -1,0 +1,66 @@
+// ============================================================
+// VDC EXCHANGE RULES — merge these match blocks into the
+// clearsky-portal firestore.rules (inside `match /databases/{db}/documents`)
+// ============================================================
+
+// --- helpers (add to your existing top-level function block if not present) ---
+function vdcSignedIn()  { return request.auth != null; }
+function vdcProfile()   { return get(/databases/$(database)/documents/vdc_profiles/$(request.auth.uid)).data; }
+function vdcIsOperator(){ return vdcSignedIn() && vdcProfile().role == 'operator'; }
+function vdcOperatorOrg(){ return vdcProfile().operatorOrg; }
+
+// Profiles: a user reads/writes only their own. Operators may read any (to show owner names).
+match /vdc_profiles/{uid} {
+  allow read:  if vdcSignedIn() && (request.auth.uid == uid || vdcIsOperator());
+  allow create:if vdcSignedIn() && request.auth.uid == uid;
+  allow update:if vdcSignedIn() && request.auth.uid == uid;
+}
+
+// Assets: owner (buyer) full control of own docs; operators read all + update status/metering.
+match /vdc_assets/{id} {
+  allow read: if vdcSignedIn() && (
+                resource.data.ownerUid == request.auth.uid ||
+                vdcIsOperator() ||
+                resource.data.status in ['live','matched']   // public floor listings
+              );
+  allow create: if vdcSignedIn() && request.resource.data.ownerUid == request.auth.uid;
+  allow update: if vdcSignedIn() && (
+                  resource.data.ownerUid == request.auth.uid ||  // owner edits
+                  vdcIsOperator()                                 // operators run workflow
+                );
+  allow delete: if vdcSignedIn() && resource.data.ownerUid == request.auth.uid;
+}
+
+// Connectors: operators read all. Write allowed to the owning org, or to ClearSky (admin).
+match /vdc_connectors/{key} {
+  allow read:  if vdcIsOperator();
+  allow write: if vdcIsOperator() && (
+                 vdcOperatorOrg() == resource.data.owner ||
+                 vdcOperatorOrg() == request.resource.data.owner ||
+                 vdcOperatorOrg() == 'clearsky'
+               );
+}
+
+// RFQs: buyer owns their request; operators read all + update status (quote count, lock).
+match /vdc_rfqs/{id} {
+  allow read:   if vdcSignedIn() && (resource.data.buyerUid == request.auth.uid || vdcIsOperator());
+  allow create: if vdcSignedIn() && request.resource.data.buyerUid == request.auth.uid;
+  allow update: if vdcSignedIn() && (resource.data.buyerUid == request.auth.uid || vdcIsOperator());
+  allow delete: if vdcSignedIn() && resource.data.buyerUid == request.auth.uid;
+}
+
+// Quotes: operators create/read; the RFQ's buyer may read quotes on their own request.
+match /vdc_quotes/{id} {
+  allow read:   if vdcSignedIn() && (
+                  vdcIsOperator() ||
+                  get(/databases/$(database)/documents/vdc_rfqs/$(resource.data.rfqId)).data.buyerUid == request.auth.uid
+                );
+  allow create: if vdcIsOperator() && request.resource.data.providerUid == request.auth.uid;
+  allow update: if vdcIsOperator() && resource.data.providerUid == request.auth.uid;
+}
+
+// Events: append-only audit log. Any signed-in user may write their own; operators read all.
+match /vdc_events/{id} {
+  allow read:   if vdcIsOperator();
+  allow create: if vdcSignedIn() && request.resource.data.byUid == request.auth.uid;
+}
